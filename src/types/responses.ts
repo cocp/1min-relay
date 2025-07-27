@@ -22,10 +22,11 @@ export interface OneMinImageResponse {
 export interface RateLimitRecord {
   timestamps: number[];
   tokenCount: number;
+  windowStart?: number;
 }
 
 export interface RateLimitConfig {
-  windowMs: number;     // Time window (milliseconds)
-  maxRequests: number;  // Maximum requests
-  maxTokens?: number;   // Maximum tokens (optional)
+  windowMs: number; // Time window (milliseconds)
+  maxRequests: number; // Maximum requests
+  maxTokens?: number; // Maximum tokens (optional)
 }
