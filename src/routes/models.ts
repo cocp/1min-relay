@@ -1,12 +1,12 @@
 import { Hono } from "hono";
-import { HonoEnv } from "../types/hono";
 import { handleModelsEndpoint } from "../handlers";
-import { ModelsResponse } from "../types";
+import type { ModelsResponse } from "../types";
+import type { HonoEnv } from "../types/hono";
 
 const app = new Hono<HonoEnv>();
 
 app.get("/", async (c) => {
-  const response = await handleModelsEndpoint();
+  const response = await handleModelsEndpoint(c.env);
   const data = (await response.json()) as ModelsResponse;
   return c.json(data);
 });

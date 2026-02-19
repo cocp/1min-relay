@@ -4,144 +4,70 @@
  * Uses OpenAI Responses API format with output[] instead of choices[]
  */
 
-import {
-  Env,
-  ResponseRequest,
-  ResponseInputItem,
+import { DEFAULT_MODEL } from "../constants";
+import type {
   Message,
   OneMinChatResponse,
+  ResponseFormat,
+  ResponseInputItem,
+  ResponseRequest,
   ResponsesAPIResponse,
   ResponsesOutputMessage,
-  ResponseFormat,
 } from "../types";
-import { OneMinApiService } from "../services";
 import {
-  createErrorResponse,
-  createSuccessResponse,
-  WebSearchConfig,
-  processMessagesWithImageCheck,
-  parseAndValidateModel,
   calculateTokens,
-  extractAllMessageText,
+  createSuccessResponse,
+  estimateInputTokens,
+  extractOneMinContent,
+  ValidationError,
+  validateModelAndMessages,
+  type WebSearchConfig,
 } from "../utils";
-import {
-  createSSEResponse,
-  writeSSEEventWithType,
-  writeSSEDone,
-} from "../utils/sse";
-import { supportsVision } from "../utils/model-capabilities";
-import { SimpleUTF8Decoder } from "../utils/utf8-decoder";
-import { ALL_ONE_MIN_AVAILABLE_MODELS, DEFAULT_MODEL } from "../constants";
+import { writeSSEDone, writeSSEEventWithType } from "../utils/sse";
+import { executeStreamingPipeline } from "../utils/streaming";
+import { BaseTextHandler } from "./base";
 
-export class ResponseHandler {
-  private env: Env;
-  private apiService: OneMinApiService;
-
-  constructor(env: Env) {
-    this.env = env;
-    this.apiService = new OneMinApiService(env);
-  }
-
-  async handleResponses(request: Request): Promise<Response> {
-    try {
-      const requestBody: ResponseRequest = await request.json();
-
-      // Extract API key from Authorization header
-      const authHeader = request.headers.get("Authorization");
-      const apiKey = authHeader?.replace("Bearer ", "") || "";
-
-      return await this.handleResponsesWithBody(requestBody, apiKey);
-    } catch (error) {
-      console.error("Response error:", error);
-      return createErrorResponse("Internal server error", 500);
-    }
-  }
-
+export class ResponseHandler extends BaseTextHandler {
   async handleResponsesWithBody(
     requestBody: ResponseRequest,
     apiKey: string,
   ): Promise<Response> {
-    try {
-      // Validate required fields - support both input and messages formats
-      if (
-        !requestBody.input &&
-        (!requestBody.messages || !Array.isArray(requestBody.messages))
-      ) {
-        return createErrorResponse(
-          'Either "input" field (string or array) or "messages" field (array) is required',
-        );
+    // Validate required fields - support both input and messages formats
+    if (
+      !requestBody.input &&
+      (!requestBody.messages || !Array.isArray(requestBody.messages))
+    ) {
+      throw new ValidationError(
+        'Either "input" field (string or array) or "messages" field (array) is required',
+        "input",
+      );
+    }
+
+    // Convert input format to messages format
+    let messages: Message[];
+    if (requestBody.input) {
+      messages = this.convertInputToMessages(
+        requestBody.input,
+        requestBody.instructions,
+      );
+    } else {
+      messages = requestBody.messages as Message[];
+      // Add instructions as system message if provided
+      if (requestBody.instructions) {
+        messages = [
+          { role: "system", content: requestBody.instructions },
+          ...messages,
+        ];
       }
+    }
 
-      // Convert input format to messages format
-      let messages: Message[];
-      if (requestBody.input) {
-        messages = this.convertInputToMessages(
-          requestBody.input,
-          requestBody.instructions,
-        );
-      } else {
-        messages = requestBody.messages as Message[];
-        // Add instructions as system message if provided
-        if (requestBody.instructions) {
-          messages = [
-            { role: "system", content: requestBody.instructions },
-            ...messages,
-          ];
-        }
-      }
+    const rawModel = requestBody.model || DEFAULT_MODEL;
 
-      // Set default model if not provided
-      const rawModel = requestBody.model || DEFAULT_MODEL;
+    const { cleanModel, webSearchConfig, processedMessages } =
+      await validateModelAndMessages(rawModel, messages, this.env);
 
-      // Parse model name and get web search configuration
-      const parseResult = parseAndValidateModel(rawModel, this.env);
-      if (parseResult.error) {
-        return createErrorResponse(
-          parseResult.error,
-          400,
-          "invalid_request_error",
-          "model_not_found",
-        );
-      }
-
-      const { cleanModel, webSearchConfig } = parseResult;
-
-      // Validate that the clean model exists in our supported models
-      if (!ALL_ONE_MIN_AVAILABLE_MODELS.includes(cleanModel)) {
-        return createErrorResponse(
-          `The model '${cleanModel}' does not exist`,
-          400,
-          "invalid_request_error",
-          "model_not_found",
-        );
-      }
-
-      // Process messages and check for images in a single pass
-      const { processedMessages, hasImages } =
-        processMessagesWithImageCheck(messages);
-      if (hasImages && !supportsVision(cleanModel)) {
-        return createErrorResponse(
-          `Model '${cleanModel}' does not support image inputs`,
-          400,
-          "invalid_request_error",
-          "model_not_supported",
-        );
-      }
-
-      if (requestBody.stream) {
-        return this.handleStreamingResponse(
-          processedMessages,
-          cleanModel,
-          requestBody.temperature,
-          requestBody.max_tokens,
-          requestBody.response_format,
-          requestBody.reasoning_effort,
-          apiKey,
-          webSearchConfig,
-        );
-      }
-
-      return this.handleNonStreamingResponse(
+    if (requestBody.stream) {
+      return this.handleStreamingResponse(
         processedMessages,
         cleanModel,
         requestBody.temperature,
@@ -151,10 +77,18 @@ export class ResponseHandler {
         apiKey,
         webSearchConfig,
       );
-    } catch (error) {
-      console.error("Response error:", error);
-      return createErrorResponse("Internal server error", 500);
     }
+
+    return this.handleNonStreamingResponse(
+      processedMessages,
+      cleanModel,
+      requestBody.temperature,
+      requestBody.max_tokens,
+      requestBody.response_format,
+      requestBody.reasoning_effort,
+      apiKey,
+      webSearchConfig,
+    );
   }
 
   private convertInputToMessages(
@@ -178,8 +112,11 @@ export class ResponseHandler {
             typeof item.content === "string"
               ? item.content
               : item.content
-                  .filter((c) => c.type === "text" && c.text)
-                  .map((c) => c.text!)
+                  .filter(
+                    (c): c is typeof c & { text: string } =>
+                      c.type === "text" && !!c.text,
+                  )
+                  .map((c) => c.text)
                   .join("\n");
           messages.push({ role: item.role, content });
         }
@@ -199,39 +136,27 @@ export class ResponseHandler {
     apiKey?: string,
     webSearchConfig?: WebSearchConfig,
   ): Promise<Response> {
-    try {
-      const enhancedMessages = this.enhanceMessagesForStructuredResponse(
-        messages,
-        responseFormat,
-        reasoningEffort,
-      );
+    const enhancedMessages = this.enhanceMessagesForStructuredResponse(
+      messages,
+      responseFormat,
+      reasoningEffort,
+    );
 
-      const requestBody = await this.apiService.buildChatRequestBody(
-        enhancedMessages,
-        model,
-        apiKey || "",
-        temperature,
-        maxTokens,
-        webSearchConfig,
-      );
+    const data = await this.sendNonStreamingRequest(
+      enhancedMessages,
+      model,
+      apiKey || "",
+      temperature,
+      maxTokens,
+      webSearchConfig,
+    );
 
-      const response = await this.apiService.sendChatRequest(
-        requestBody,
-        false,
-        apiKey,
-      );
-      const data = (await response.json()) as OneMinChatResponse;
-
-      const responsesAPIResponse = this.transformToResponsesFormat(
-        data,
-        model,
-        responseFormat,
-      );
-      return createSuccessResponse(responsesAPIResponse);
-    } catch (error) {
-      console.error("Non-streaming response error:", error);
-      return createErrorResponse("Failed to process response", 500);
-    }
+    const responsesAPIResponse = this.transformToResponsesFormat(
+      data,
+      model,
+      responseFormat,
+    );
+    return createSuccessResponse(responsesAPIResponse);
   }
 
   private async handleStreamingResponse(
@@ -244,169 +169,126 @@ export class ResponseHandler {
     apiKey?: string,
     webSearchConfig?: WebSearchConfig,
   ): Promise<Response> {
-    try {
-      const enhancedMessages = this.enhanceMessagesForStructuredResponse(
-        messages,
-        responseFormat,
-        reasoningEffort,
-      );
+    const enhancedMessages = this.enhanceMessagesForStructuredResponse(
+      messages,
+      responseFormat,
+      reasoningEffort,
+    );
 
-      const requestBody = await this.apiService.buildChatRequestBody(
-        enhancedMessages,
-        model,
-        apiKey || "",
-        temperature,
-        maxTokens,
-        webSearchConfig,
-      );
+    const response = await this.sendStreamingRequest(
+      enhancedMessages,
+      model,
+      apiKey || "",
+      temperature,
+      maxTokens,
+      webSearchConfig,
+    );
 
-      const response = await this.apiService.sendChatRequest(
-        requestBody,
-        true,
-        apiKey,
-      );
+    const responseId = `resp-${crypto.randomUUID()}`;
+    const messageId = `msg-${crypto.randomUUID()}`;
 
-      const { readable, writable } = new TransformStream();
-      const writer = writable.getWriter();
+    return executeStreamingPipeline(response, {
+      onStart: async (writer) => {
+        // Send response.created
+        const initialResponse: ResponsesAPIResponse = {
+          id: responseId,
+          object: "response",
+          created_at: Math.floor(Date.now() / 1000),
+          model,
+          output: [],
+          status: "in_progress",
+          usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        };
+        await writeSSEEventWithType(writer, "response.created", {
+          type: "response.created",
+          response: initialResponse,
+        });
 
-      const reader = response.body?.getReader();
-      if (!reader) {
-        await writer.close();
-        return createSSEResponse(readable);
-      }
+        // Send output_item.added
+        const outputItem: ResponsesOutputMessage = {
+          type: "message",
+          id: messageId,
+          role: "assistant",
+          content: [{ type: "output_text", text: "" }],
+          status: "in_progress",
+        };
+        await writeSSEEventWithType(writer, "response.output_item.added", {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: outputItem,
+        });
 
-      const responseId = `resp-${crypto.randomUUID()}`;
-      const messageId = `msg-${crypto.randomUUID()}`;
+        // Send content_part.added
+        await writeSSEEventWithType(writer, "response.content_part.added", {
+          type: "response.content_part.added",
+          output_index: 0,
+          content_index: 0,
+          part: { type: "output_text", text: "" },
+        });
+      },
+      onChunk: async (writer, chunk) => {
+        await writeSSEEventWithType(writer, "response.output_text.delta", {
+          type: "response.output_text.delta",
+          output_index: 0,
+          content_index: 0,
+          delta: chunk,
+        });
+      },
+      onEnd: async (writer, accumulatedContent) => {
+        // Send text done
+        await writeSSEEventWithType(writer, "response.output_text.done", {
+          type: "response.output_text.done",
+          output_index: 0,
+          content_index: 0,
+          text: accumulatedContent,
+        });
 
-      (async () => {
-        try {
-          const utf8Decoder = new SimpleUTF8Decoder();
-          const contentChunks: string[] = [];
+        // Send content_part.done
+        await writeSSEEventWithType(writer, "response.content_part.done", {
+          type: "response.content_part.done",
+          output_index: 0,
+          content_index: 0,
+          part: { type: "output_text", text: accumulatedContent },
+        });
 
-          // Send response.created
-          const initialResponse: ResponsesAPIResponse = {
-            id: responseId,
-            object: "response",
-            created_at: Math.floor(Date.now() / 1000),
-            model,
-            output: [],
-            status: "in_progress",
-            usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-          };
-          await writeSSEEventWithType(writer, "response.created", {
-            type: "response.created",
-            response: initialResponse,
-          });
+        // Send output_item.done
+        const completedItem: ResponsesOutputMessage = {
+          type: "message",
+          id: messageId,
+          role: "assistant",
+          content: [{ type: "output_text", text: accumulatedContent }],
+          status: "completed",
+        };
+        await writeSSEEventWithType(writer, "response.output_item.done", {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: completedItem,
+        });
 
-          // Send output_item.added
-          const outputItem: ResponsesOutputMessage = {
-            type: "message",
-            id: messageId,
-            role: "assistant",
-            content: [{ type: "output_text", text: "" }],
-            status: "in_progress",
-          };
-          await writeSSEEventWithType(writer, "response.output_item.added", {
-            type: "response.output_item.added",
-            output_index: 0,
-            item: outputItem,
-          });
+        // Send response.done
+        const outputTokens = calculateTokens(accumulatedContent, model);
+        const inputTokens = estimateInputTokens(messages);
+        const finalResponse: ResponsesAPIResponse = {
+          id: responseId,
+          object: "response",
+          created_at: Math.floor(Date.now() / 1000),
+          model,
+          output: [completedItem],
+          status: "completed",
+          usage: {
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
+            total_tokens: inputTokens + outputTokens,
+          },
+        };
+        await writeSSEEventWithType(writer, "response.done", {
+          type: "response.done",
+          response: finalResponse,
+        });
 
-          // Send content_part.added
-          await writeSSEEventWithType(writer, "response.content_part.added", {
-            type: "response.content_part.added",
-            output_index: 0,
-            content_index: 0,
-            part: { type: "output_text", text: "" },
-          });
-
-          // Stream content deltas
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = utf8Decoder.decode(value, done);
-            if (chunk) {
-              contentChunks.push(chunk);
-              await writeSSEEventWithType(
-                writer,
-                "response.output_text.delta",
-                {
-                  type: "response.output_text.delta",
-                  output_index: 0,
-                  content_index: 0,
-                  delta: chunk,
-                },
-              );
-            }
-          }
-
-          const accumulatedContent = contentChunks.join("");
-
-          // Send text done
-          await writeSSEEventWithType(writer, "response.output_text.done", {
-            type: "response.output_text.done",
-            output_index: 0,
-            content_index: 0,
-            text: accumulatedContent,
-          });
-
-          // Send content_part.done
-          await writeSSEEventWithType(writer, "response.content_part.done", {
-            type: "response.content_part.done",
-            output_index: 0,
-            content_index: 0,
-            part: { type: "output_text", text: accumulatedContent },
-          });
-
-          // Send output_item.done
-          const completedItem: ResponsesOutputMessage = {
-            type: "message",
-            id: messageId,
-            role: "assistant",
-            content: [{ type: "output_text", text: accumulatedContent }],
-            status: "completed",
-          };
-          await writeSSEEventWithType(writer, "response.output_item.done", {
-            type: "response.output_item.done",
-            output_index: 0,
-            item: completedItem,
-          });
-
-          // Send response.done
-          const outputTokens = calculateTokens(accumulatedContent, model);
-          const inputTokens = this.estimateInputTokens(messages);
-          const finalResponse: ResponsesAPIResponse = {
-            id: responseId,
-            object: "response",
-            created_at: Math.floor(Date.now() / 1000),
-            model,
-            output: [completedItem],
-            status: "completed",
-            usage: {
-              input_tokens: inputTokens,
-              output_tokens: outputTokens,
-              total_tokens: inputTokens + outputTokens,
-            },
-          };
-          await writeSSEEventWithType(writer, "response.done", {
-            type: "response.done",
-            response: finalResponse,
-          });
-
-          await writeSSEDone(writer);
-          await writer.close();
-        } catch (error) {
-          console.error("Responses streaming error:", error);
-          await writer.abort(error);
-        }
-      })();
-
-      return createSSEResponse(readable);
-    } catch (error) {
-      console.error("Streaming response error:", error);
-      return createErrorResponse("Failed to process streaming response", 500);
-    }
+        await writeSSEDone(writer);
+      },
+    });
   }
 
   private enhanceMessagesForStructuredResponse(
@@ -429,7 +311,6 @@ export class ResponseHandler {
             structurePrompt = `Please respond with a valid JSON object that strictly follows this schema: ${JSON.stringify(responseFormat.json_schema.schema)}. The response should be named "${responseFormat.json_schema.name}". ${responseFormat.json_schema.description || ""}`;
           }
           break;
-        case "text":
         default:
           structurePrompt =
             "Please provide a clear and structured text response.";
@@ -449,8 +330,8 @@ export class ResponseHandler {
       const systemMessageIndex = enhancedMessages.findIndex(
         (msg) => msg.role === "system",
       );
-      if (systemMessageIndex >= 0) {
-        const existing = enhancedMessages[systemMessageIndex]!;
+      const existing = enhancedMessages[systemMessageIndex];
+      if (systemMessageIndex >= 0 && existing) {
         enhancedMessages[systemMessageIndex] = {
           role: existing.role,
           content:
@@ -469,19 +350,12 @@ export class ResponseHandler {
     return enhancedMessages;
   }
 
-  private estimateInputTokens(messages: Message[]): number {
-    return calculateTokens(extractAllMessageText(messages));
-  }
-
   private transformToResponsesFormat(
     data: OneMinChatResponse,
     model: string,
     responseFormat?: ResponseFormat,
   ): ResponsesAPIResponse {
-    let content =
-      data.aiRecord?.aiRecordDetail?.resultObject?.[0] ||
-      data.content ||
-      "No response generated";
+    let content = extractOneMinContent(data);
 
     // Try to parse JSON if response format is JSON
     if (

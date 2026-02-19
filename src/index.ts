@@ -1,16 +1,23 @@
 import { Hono } from "hono";
-import { HonoEnv } from "./types/hono";
 import { corsMiddleware } from "./middleware/cors";
 import { errorHandler } from "./middleware/error-handler";
+import apiRoutes from "./routes/api";
 // Logger middleware removed for production
 import rootRoutes from "./routes/root";
-import apiRoutes from "./routes/api";
+import { getModelData } from "./services/model-registry";
+import type { HonoEnv } from "./types/hono";
 
 const app = new Hono<HonoEnv>();
 
 // Global error handler must be first
 app.use("*", errorHandler);
 app.use("*", corsMiddleware);
+
+// Warm up model cache (non-blocking, won't delay the request)
+app.use("*", async (c, next) => {
+  c.executionCtx.waitUntil(getModelData(c.env).catch(() => {}));
+  await next();
+});
 
 // Global unhandled error handler
 app.onError((err, c) => {

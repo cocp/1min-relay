@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-02-18
+
+### Added
+- **Dynamic Model Registry**: Model data is now fetched live from the 1min.ai API instead of hardcoded lists
+  - Two-tier caching: in-memory (5 min TTL) + Cloudflare KV (1 hr TTL)
+  - Thundering herd protection via inflight promise deduplication
+  - Stale cache fallback when the upstream API is unavailable
+  - KV data shape validation to handle schema changes across deployments
+  - API response validation to surface unexpected response shapes
+- **Model Cache Warmup**: Non-blocking `waitUntil` warmup on every `/v1/*` request to pre-populate the cache
+- **`MODEL_CACHE` KV Namespace**: New KV binding for caching model data across Worker isolates
+- **`ONE_MIN_MODELS_API_URL` Environment Variable**: Configurable 1min.ai models API endpoint
+
+### Changed
+- **All model capability checks are now async** — `supportsVision()`, `supportsCodeInterpreter()`, `supportsImageGeneration()`, `getModelCapabilities()`, `validateModelCapabilities()`, `validateModelAndMessages()` now return Promises and require an `env` parameter
+- **`handleModelsEndpoint()` is now async** and takes an `env` parameter; capabilities are derived from the registry
+- **Web search support**: All chat models now support `:online` suffix — removed per-model validation
+- **Model parser**: Removed `colonCount > 1` early rejection so future model IDs containing colons are handled correctly
+- **Default models updated** to match 1min.ai API model IDs:
+  - `DEFAULT_MODEL`: `mistral-nemo` → `open-mistral-nemo`
+  - `DEFAULT_IMAGE_MODEL`: `flux-schnell` → `black-forest-labs/flux-schnell`
+- **Optimized `getModelCapabilities()`**: Single `getModelData()` call instead of 4 parallel calls
+- **Optimized `validateModelAndMessages()`**: Single `getModelData()` call for model existence + vision check
+
+### Removed
+- **`src/constants/models.ts`** — Deleted entirely (227 lines of hardcoded model lists)
+  - `ALL_ONE_MIN_AVAILABLE_MODELS`, `VISION_SUPPORTED_MODELS`, `CODE_INTERPRETER_SUPPORTED_MODELS`, `RETRIEVAL_SUPPORTED_MODELS`, `IMAGE_GENERATION_MODELS`, `VARIATION_SUPPORTED_MODELS`, `TEXT_TO_SPEECH_MODELS`, `SPEECH_TO_TEXT_MODELS`
+- **`supportsRetrieval()`** — All chat models support web search via request body settings
+- **`supportsTextToSpeech()` / `supportsSpeechToText()`** — No TTS/STT endpoints exposed
+- **`validateModelSupportsWebSearch()`** — No longer needed; any chat model accepts `:online`
+
+### Breaking Changes
+- **Model IDs now come from the 1min.ai API** — some IDs have changed (e.g., `flux-schnell` → `black-forest-labs/flux-schnell`). Clients must use the IDs returned by `GET /v1/models`.
+- **Capability check functions are now async** — callers must `await` them
+- **`handleModelsEndpoint()` signature changed** — now requires `env` parameter
+- **Models not listed in the API are no longer available** — xAI (Grok), Perplexity (Sonar), and some OpenAI reasoning models are not currently exposed by the 1min.ai models API
+
+### Migration Guide
+1. Create a new KV namespace: `wrangler kv:namespace create "MODEL_CACHE"`
+2. Add the KV binding and `ONE_MIN_MODELS_API_URL` to `wrangler.jsonc`
+3. Update any hardcoded model IDs in client code to match `GET /v1/models` output
+
+## [3.8.0] - 2026-02-18
+
+### Added
+- **GitHub Actions CI**: Added `.github/workflows/ci.yml` workflow
+  - Runs on push to `main` and pull requests
+  - Lint, format check, and TypeScript type check steps
+- **Biome Linter**: New `npm run lint` and `npm run check` scripts for linting and comprehensive code checks
+
+### Changed
+- **Migrated from Prettier to Biome**: Replaced Prettier with Biome for formatting, linting, and import sorting
+  - Formatting defaults match Prettier (2-space indent, 80 line width, double quotes)
+  - Enabled recommended lint rules and automatic import organization
+  - `npm run format` now runs `biome check --write src/`
+- **Code quality fixes** (auto-applied by Biome linter):
+  - Replaced `isNaN()` with `Number.isNaN()` for type-safe NaN checks
+  - Replaced string concatenation with template literals
+  - Simplified conditions with optional chaining (`?.`)
+  - Removed useless `case` clause before `default` in switch statement
+  - Prefixed intentionally unused parameters with `_`
+  - Replaced non-null assertions with type predicates and guard checks
+
+### Removed
+- **Prettier**: Removed `prettier` dev dependency
+
+## [3.7.1] - 2026-02-09
+
+### Changed
+- **Handler Refactoring**: Eliminated HIGH priority code duplication across `ChatHandler`, `ResponseHandler`, and `MessagesHandler`
+  - Created `BaseTextHandler` base class with shared `env`/`apiService` constructor
+  - Extracted `estimateInputTokens()` to shared `src/utils/tokens.ts` utility
+  - Extracted `validateModelAndMessages()` to `src/utils/model-validation.ts` — consolidates model parsing, model list check, image processing, and vision validation into a single call that throws typed errors
+  - Extracted `executeStreamingPipeline()` to `src/utils/streaming.ts` — eliminates duplicated TransformStream/reader/writer/UTF-8 decoder boilerplate; handlers now only provide `onStart`/`onChunk`/`onEnd` callbacks
+
+### Fixed
+- **Anthropic Image Error Status Code**: `extractAnthropicContent` now throws `ValidationError` (400) instead of bare `Error` (500) when unsupported image content blocks are sent via the Anthropic Messages API
+- **Error Message Leakage**: Messages handler API calls now wrap upstream errors in `ApiError("Failed to process message")` to prevent leaking internal URLs or stack traces to clients
+- **Unhandled Promise Rejection**: Fixed `void writer.close()` in streaming pipeline to properly handle the promise with `.catch()`
+
 ## [3.7.0] - 2026-02-08
 
 ### Added

@@ -2,17 +2,17 @@
  * 1min.ai API service layer
  */
 
-import {
+import type {
   Env,
-  OneMinImageResponse,
   Message,
-  OneMinRequestBody,
+  OneMinImageResponse,
   OneMinPromptObject,
+  OneMinRequestBody,
 } from "../types";
 import { processImageUrl, uploadImageToAsset } from "../utils/image";
-import { supportsVision } from "../utils/model-capabilities";
-import { WebSearchConfig } from "../utils/model-parser";
 import { extractTextFromMessageContent } from "../utils/message-processing";
+import type { WebSearchConfig } from "../utils/model-parser";
+import { isVisionModel } from "./model-registry";
 
 // Helper function to format conversation for the API
 // Converts message array to format expected by 1min.ai API
@@ -151,7 +151,7 @@ export class OneMinApiService {
     }
 
     const response = await fetch(
-      this.env.ONE_MIN_API_URL + "?isStreaming=false",
+      `${this.env.ONE_MIN_API_URL}?isStreaming=false`,
       {
         method: "POST",
         headers,
@@ -175,8 +175,8 @@ export class OneMinApiService {
     messages: Message[],
     model: string,
     apiKey: string,
-    temperature?: number,
-    maxTokens?: number,
+    _temperature?: number,
+    _maxTokens?: number,
     webSearchConfig?: WebSearchConfig,
   ): Promise<OneMinRequestBody> {
     // Process images and check for vision model support
@@ -194,7 +194,7 @@ export class OneMinApiService {
           hasImageRequests = true;
 
           // Check if model supports vision inputs
-          if (!supportsVision(model)) {
+          if (!(await isVisionModel(model, this.env))) {
             throw new Error(`Model '${model}' does not support image inputs`);
           }
 
@@ -248,7 +248,7 @@ export class OneMinApiService {
       };
 
       // Add web search parameters if enabled
-      if (webSearchConfig && webSearchConfig.webSearch) {
+      if (webSearchConfig?.webSearch) {
         promptObject.numOfSite = webSearchConfig.numOfSite;
         promptObject.maxWord = webSearchConfig.maxWord;
       }
