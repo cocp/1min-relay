@@ -3,13 +3,14 @@
  * https://developers.cloudflare.com/workers/wrangler/configuration/
  */
 {
-	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "1min-relay",
-	"main": "src/index.ts",
-	"compatibility_date": "2025-06-17",
-	"observability": {
-		"enabled": true
-	},
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "1min-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-07-25",
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+  },
 
 	/**
 	 * Smart Placement
@@ -34,18 +35,23 @@
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
 	 */
 
-	 "vars": {
+	"vars": {
 		"ONE_MIN_API_URL": "https://api.1min.ai/api/features",
 		"ONE_MIN_CONVERSATION_API_URL": "https://api.1min.ai/api/conversations",
 		"ONE_MIN_CONVERSATION_API_STREAMING_URL": "https://api.1min.ai/api/features?isStreaming=true",
-		"ONE_MIN_ASSET_URL": "https://api.1min.ai/api/assets"
+		"ONE_MIN_ASSET_URL": "https://api.1min.ai/api/assets",
+		"ONE_MIN_MODELS_API_URL": "https://api.1min.ai/models",
 	},
 
 	"kv_namespaces": [
 		{
 		  "binding": "RATE_LIMIT_STORE",
 		  "id": "b82119f998174f43aa982d021a2348c5" // IMPORTANT: Change this to your KV namespace ID
-		}
+		},
+		{
+		  "binding": "MODEL_CACHE",
+		  "id": "b0f808ef2af441139d421733d07313f5", // IMPORTANT: Change this to your KV namespace ID
+		},
 	  ],
 
 	/**
